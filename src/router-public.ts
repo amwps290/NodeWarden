@@ -35,6 +35,8 @@ import { isSafeWebsiteIconContentType } from './utils/content-type';
 import { jsonResponse, unsupportedResponse } from './utils/response';
 import { StorageService } from './services/storage';
 import type { Env } from './types';
+import { getConfiguredWebAuthnAllowedOrigins } from './utils/origins';
+import { buildConfigResponse } from './config-response';
 
 type PublicRateLimiter = (category?: string, maxRequests?: number) => Promise<Response | null>;
 type JwtUnsafeReason = 'missing' | 'too_short' | null;
@@ -44,6 +46,12 @@ export interface WebBootstrapResponse {
   jwtUnsafeReason: JwtUnsafeReason;
   jwtSecretMinLength: number;
   registrationInviteRequired: boolean;
+  webAuthnAllowedOrigins: string[];
+  websiteIconsEnabled: boolean;
+}
+
+function isWebsiteIconProxyEnabled(env: Env): boolean {
+  return true;
 }
 
 function isSameOriginWriteRequest(request: Request): boolean {
@@ -86,60 +94,6 @@ function handleMissingWebsiteIcon(): Response {
       'Cache-Control': 'public, max-age=300',
     },
   });
-}
-
-function buildIconServiceBase(origin: string): string {
-  return `${origin}/icons`;
-}
-
-function buildIconServiceTemplate(origin: string): string {
-  return `${buildIconServiceBase(origin)}/{}/icon.png`;
-}
-
-function buildIconServiceCsp(origin: string): string {
-  return `img-src 'self' data: ${origin}`;
-}
-
-function buildConfigResponse(origin: string) {
-  const fillAssistBase = `${origin}/fill-assist/`;
-  return {
-    version: LIMITS.compatibility.bitwardenServerVersion,
-    gitHash: 'nodewarden',
-    server: null,
-    environment: {
-      cloudRegion: 'self-hosted',
-      vault: origin,
-      api: origin + '/api',
-      identity: origin + '/identity',
-      notifications: origin + '/notifications',
-      icons: origin,
-      sso: '',
-      fillAssistRules: fillAssistBase,
-    },
-    push: {
-      pushTechnology: 0,
-      vapidPublicKey: null,
-    },
-    communication: null,
-    settings: {
-      disableUserRegistration: false,
-    },
-    _icon_service_url: buildIconServiceTemplate(origin),
-    _icon_service_csp: buildIconServiceCsp(origin),
-    featureStates: {
-      'cipher-key-encryption': LIMITS.compatibility.cipherKeyEncryptionFeatureEnabled,
-      'duo-redirect': true,
-      'email-verification': true,
-      'fill-assist-targeting-rules': true,
-      'pm-19051-send-email-verification': false,
-      'pm-19148-innovation-archive': true,
-      'pm-4516-devices-add-last-activity-date': true,
-      'pm-30529-webauthn-related-origins': true,
-      'unauth-ui-refresh': true,
-      'web-push': false,
-    },
-    object: 'config',
-  };
 }
 
 function normalizeIconHost(rawHost: string): string | null {
@@ -255,7 +209,11 @@ function iconResponse(body: BodyInit | null, contentType: string | null): Respon
   });
 }
 
-async function handleWebsiteIcon(host: string, fallbackMode: 'default' | 'not-found' = 'default'): Promise<Response> {
+async function handleWebsiteIcon(env: Env, host: string, fallbackMode: 'default' | 'not-found' = 'default'): Promise<Response> {
+  if (!isWebsiteIconProxyEnabled(env)) {
+    return fallbackMode === 'not-found' ? handleMissingWebsiteIcon() : handleNwFavicon();
+  }
+
   const normalizedHost = normalizeIconHost(host);
   if (!normalizedHost) return fallbackMode === 'not-found' ? handleMissingWebsiteIcon() : handleNwFavicon();
 
@@ -322,6 +280,8 @@ export async function buildWebBootstrapResponse(env: Env): Promise<WebBootstrapR
     jwtUnsafeReason,
     jwtSecretMinLength: LIMITS.auth.jwtSecretMinLength,
     registrationInviteRequired: userCount > 0,
+    webAuthnAllowedOrigins: getConfiguredWebAuthnAllowedOrigins(env),
+    websiteIconsEnabled: isWebsiteIconProxyEnabled(env),
   };
 }
 
@@ -372,7 +332,7 @@ export async function handlePublicRoute(
     const blocked = await enforcePublicRateLimit('public-icon', LIMITS.rateLimit.publicIconRequestsPerMinute);
     if (blocked) return blocked;
     const fallbackMode = new URL(request.url).searchParams.get('fallback') === '404' ? 'not-found' : 'default';
-    return handleWebsiteIcon(iconMatch[1], fallbackMode);
+    return handleWebsiteIcon(env, iconMatch[1], fallbackMode);
   }
 
   const publicAttachmentMatch = path.match(/^\/api\/attachments\/([a-f0-9-]+)\/([a-f0-9-]+)$/i);
